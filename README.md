@@ -40,7 +40,7 @@ docker run --rm \
   -e TORRENT_PORT=9091 \
   -e NYAA_URL=https://nyaa.si/?f=0&c=0_0&q=one+pace&o=asc \
   -e DEBUG=true \
-  timothe/ace-pace:latest
+  monothex/ace-pace:latest
 ```
 
 ### Using Docker Compose
@@ -75,19 +75,26 @@ The following environment variables can be used to configure Ace-Pace in Docker:
 - `DB` - Set to `true` to generate CSV database export on container start (default: `false`)
 - `EPISODES_UPDATE` - Set to `true` to update episodes metadata from Nyaa on container start (default: `false`)
 - `DOWNLOAD` - Set to `true` to automatically download missing episodes after generating report (default: `false`)
+- `FETCH` - Set to `true` to scan the torrent client for completed One-Pace torrents and place video files into the media folder (default: `false`)
+  - Requires the torrent client's download directory to be mounted into the container (see Volume Mounts)
+  - For hardlinks to work, the downloads folder and media folder must be on the same filesystem
+- `FETCH_METHOD` - Method used to place fetched files: `hardlink` (default, requires same filesystem) or `copy`
 - `RENAME` - Set to `true` to rename local files in the media folder to match One-Pace episode titles from the episodes index (default: `false`)
   - Non-interactive: no confirmation prompt; use `DRY_RUN=true` to simulate renaming without changing files
   - Before renaming, ensures CRC32 cache is complete for the media folder (calculates missing CRC32s if needed)
 - `ACEPACE_MEDIA_DIR_DOCKER` - Media/library folder in Docker (default: `"/media"`). Entrypoint passes this as `--folder`.
 - `ACEPACE_CONFIG_DIR_DOCKER` - Config/data directory in Docker (default: `"/config"`). Not set in entrypoint; override if you mount config elsewhere.
-- `DRY_RUN` - When `DOWNLOAD=true`: test BitTorrent client without adding torrents. When `RENAME=true`: show rename plan without renaming (default: `false`)
+- `DRY_RUN` - When `DOWNLOAD=true` or `FETCH=true`: test BitTorrent client without making changes. When `RENAME=true`: show rename plan without renaming (default: `false`)
   - With download: validates magnet links and checks existing torrents but does not add any downloads
+  - With fetch: lists torrents that would be fetched without copying or linking any files
   - With rename: prints which files would be renamed without modifying the filesystem
 - `TORRENT_CLIENT` - BitTorrent client type: `transmission` or `qbittorrent` (default: `transmission`)
 - `TORRENT_HOST` - BitTorrent client host address (default: `localhost`)
 - `TORRENT_PORT` - BitTorrent client port (default: `9091` for Transmission, `8080` for qBittorrent)
 - `TORRENT_USER` - BitTorrent client username (optional)
 - `TORRENT_PASSWORD` - BitTorrent client password (optional)
+- `TORRENT_CATEGORY` - Category to assign to torrents when adding (qBittorrent only); also used to filter torrents when fetching (optional)
+- `TORRENT_TAGS` - Comma-separated tags to assign to torrents when adding (qBittorrent only, optional)
 - `DEBUG` - Enable debug output for troubleshooting (default: `false`)
   - Set to `true`, `1`, `yes`, or `on` to enable detailed debug information
   - When enabled, shows troubleshooting info, sample CRC32s, comparison details, and processing statistics
@@ -102,6 +109,7 @@ The following volumes should be mounted for persistent data:
 - **Config folder** (default `/config`) - Mount a directory for persistent configuration and data files (read-write). Override with `ACEPACE_CONFIG_DIR_DOCKER`.
   - Contains: `crc32_files.db`, `episodes_index.db`, `Ace-Pace_Missing.csv`, `Ace-Pace_DB.csv`
   - `episodes_index.db` now stores magnet links for all episodes, reducing the need to fetch them repeatedly
+- **Downloads folder** (required for `FETCH=true`) - Mount your torrent client's download directory so Ace-Pace can read completed files. The path inside the container must match the `save_path` reported by the torrent client. For hardlinks to work, this must be on the same filesystem as the media folder.
 
 ### Docker Execution Flow
 
@@ -113,6 +121,8 @@ When the container starts, it executes the following steps in order:
 4. **Rename** (if `RENAME=true`): Ensures CRC32 cache is complete for the media folder, then renames local files to match One-Pace episode titles (no confirmation). Use `DRY_RUN=true` to simulate only.
 5. **Download** (if `DOWNLOAD=true`): Automatically downloads missing episodes via the configured BitTorrent client
    - If `DRY_RUN=true`, tests connection and validates magnet links without adding torrents
+6. **Fetch** (if `FETCH=true`): Scans the torrent client for completed One-Pace torrents and places video files into the media folder via hardlink or copy
+   - If `DRY_RUN=true`, lists matching torrents without moving any files
 
 ### Docker Notes
 
@@ -165,7 +175,7 @@ DEBUG=true python acepace.py --folder /path/to/videos
 docker run --rm \
   -v /path/to/OnePaceLibrary:/media:rw \
   -v /path/to/config:/config:rw \
-  timothe/ace-pace:latest
+  monothex/ace-pace:latest
 ```
 
 **In Docker Compose:**

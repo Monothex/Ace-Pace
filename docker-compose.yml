@@ -1,15 +1,22 @@
 services:
   ace-pace:
     # build: .
-    image: timothe/ace-pace:latest # or timothe/ace-pace:dev for dev branch
+    image: monothex/ace-pace:latest # or monothex/ace-pace:dev for dev branch
     container_name: ace-pace
     volumes:
       - /path/to/OnePaceLibrary:/media:rw
       - /path/to/config:/config:rw
+      # Required for FETCH=true; path inside container must match torrent client's save_path
+      # Must be on same filesystem as /media for hardlinks to work
+      #- /path/to/torrent/downloads:/downloads:ro
     # network_mode: host
     environment:
       # Timezone
       - TZ=Europe/London
+
+      # How often to re-run, in seconds (default: 0 = run once and exit)
+      # 86400 = every 24 hours, 3600 = every hour
+      #- SCHEDULE=86400
 
       # Export database to CSV on container start (default: false)
       # - DB=true
@@ -25,9 +32,13 @@ services:
 
       # Download missing episodes after generating report (default: false)
       #- DOWNLOAD=true
-      # With DOWNLOAD: test client without adding torrents. With RENAME: simulate only (default: false)
+      # Fetch completed torrents and hardlink/copy video files to the media folder (default: false)
+      #- FETCH=true
+      # Method used to place fetched files: hardlink (default, same filesystem) or copy
+      #- FETCH_METHOD=hardlink
+      # With DOWNLOAD/FETCH: test client without making changes. With RENAME: simulate only (default: false)
       #- DRY_RUN=true
-      
+
       # BitTorrent client type (default: transmission)
       # Options: transmission, qbittorrent
       #- TORRENT_CLIENT=transmission
@@ -39,6 +50,10 @@ services:
       #- TORRENT_USER=admin
       # BitTorrent client password (default: empty, not required)
       #- TORRENT_PASSWORD=password
+      # Category to assign to torrents when adding (qBittorrent only); also filters torrents when fetching
+      #- TORRENT_CATEGORY=one-pace
+      # Tags to assign to torrents when adding (qBittorrent only, comma-separated)
+      #- TORRENT_TAGS=one-pace,anime
       
       # Enable debug output for troubleshooting (default: false)
       #- DEBUG=true

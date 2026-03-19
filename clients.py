@@ -13,6 +13,11 @@ class Client(abc.ABC):
     def add_torrents(self, magnets, download_folder=None, tags=None, category=None, dry_run=False):
         pass
 
+    @abc.abstractmethod
+    def get_completed_torrents(self, category=None, tags=None):
+        """Return list of completed torrents as dicts: {name: str, files: [absolute_path_str]}."""
+        pass
+
 class QBittorrentClient(Client):
     def __init__(self, host, port, username, password):
         self.client = qbittorrentapi.Client(
@@ -145,6 +150,23 @@ class QBittorrentClient(Client):
             self._add_torrents_dry_run(magnets, tags, category)
         else:
             self._add_torrents_execute(magnets, download_folder, tags, category)
+
+    def get_completed_torrents(self, category=None, tags=None):
+        """Return completed torrents filtered by category and/or tags."""
+        torrents = self.client.torrents_info(status_filter="completed")
+        if category:
+            torrents = [t for t in torrents if t.category == category]
+        if tags:
+            torrents = [t for t in torrents if any(tag in (t.tags or []) for tag in tags)]
+        result = []
+        for torrent in torrents:
+            try:
+                files = self.client.torrents_files(torrent_hash=torrent.hash)
+                file_paths = [os.path.join(torrent.save_path, f.name) for f in files]
+                result.append({"name": torrent.name, "files": file_paths})
+            except Exception as e:
+                print(f"Error getting files for torrent '{torrent.name}': {e}")
+        return result
 
 
 class TransmissionClient(Client):
@@ -279,11 +301,36 @@ class TransmissionClient(Client):
             warning_msg = "DRY RUN: Warning - " if dry_run else "Warning: "
             warning_msg += "Transmission does not support tags or categories through this script."
             print(warning_msg)
-        
+
         if dry_run:
             self._add_torrents_dry_run(magnets)
         else:
             self._add_torrents_execute(magnets, download_folder)
+
+    def get_completed_torrents(self, category=None, tags=None):
+        """Return completed torrents. Category/tags filtering is not supported by Transmission."""
+        if category or tags:
+            print("Warning: Transmission does not support category/tag filtering for completed torrents.")
+        payload = {
+            "method": "torrent-get",
+            "arguments": {"fields": ["name", "downloadDir", "isFinished", "status", "files"]},
+        }
+        try:
+            resp = self._make_rpc_request(payload)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception as e:
+            print(f"Error fetching torrent list from Transmission: {e}")
+            return []
+        torrents = data.get("arguments", {}).get("torrents", [])
+        # isFinished=True or status==6 (seeding) means download is complete
+        completed = [t for t in torrents if t.get("isFinished") or t.get("status") == 6]
+        result = []
+        for torrent in completed:
+            download_dir = torrent.get("downloadDir", "")
+            file_paths = [os.path.join(download_dir, f["name"]) for f in torrent.get("files", [])]
+            result.append({"name": torrent["name"], "files": file_paths})
+        return result
 
 
 def get_client(client_name, host, port, username, password):

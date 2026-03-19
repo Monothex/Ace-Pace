@@ -6,6 +6,7 @@ import re
 import argparse
 import zlib
 import os
+import shutil
 import signal
 import sys
 from bs4 import BeautifulSoup  # type: ignore
@@ -1352,18 +1353,38 @@ def _execute_download(client_obj, magnets, client, download_folder, tags, catego
     print(f"Successfully added {len(magnets)} episode(s) to {client}.")
 
 
+def _get_category(args):
+    """Resolve torrent category: CLI arg takes precedence, then TORRENT_CATEGORY env var (Docker)."""
+    if args.category:
+        return args.category
+    if IS_DOCKER:
+        return os.getenv("TORRENT_CATEGORY") or None
+    return None
+
+
+def _get_tags(args):
+    """Resolve torrent tags: CLI arg takes precedence, then TORRENT_TAGS env var (Docker, comma-separated)."""
+    if args.tag:
+        return args.tag
+    if IS_DOCKER:
+        tags_env = os.getenv("TORRENT_TAGS", "")
+        return [t.strip() for t in tags_env.split(",") if t.strip()] or None
+    return None
+
+
 def _handle_download_command(args):
     """Handle the download command."""
-    # Get connection parameters based on Docker mode
     if IS_DOCKER:
         result = _setup_docker_connection(args)
     else:
         result = _setup_non_docker_connection(args)
-    
+
     if result[0] is None:  # Check if setup failed
         return False
-    
+
     host, port, username, password, download_folder, client = result
+    category = _get_category(args)
+    tags = _get_tags(args)
 
     magnets = _load_magnet_links()
     if magnets is None:
@@ -1372,9 +1393,9 @@ def _handle_download_command(args):
     try:
         client_obj = get_client(client, host, port, username, password)
         if args.dry_run:
-            _execute_download_dry_run(client_obj, magnets, client, download_folder, args.tag, args.category)
+            _execute_download_dry_run(client_obj, magnets, client, download_folder, tags, category)
         else:
-            _execute_download(client_obj, magnets, client, download_folder, args.tag, args.category)
+            _execute_download(client_obj, magnets, client, download_folder, tags, category)
     except ConnectionError as e:
         print(f"Connection Error: {e}")
         print(f"Please verify that {client} is running and accessible at {host}:{port}")
@@ -1387,6 +1408,81 @@ def _handle_download_command(args):
         return False
 
     return True
+
+
+def _fetch_file(src, dest, method):
+    """Copy or hardlink src to dest. Returns True on success."""
+    if method == "hardlink":
+        os.link(src, dest)
+    else:
+        shutil.copy2(src, dest)
+    return True
+
+
+def _handle_fetch_command(args):
+    """Fetch completed torrents from the client and place video files in the media folder."""
+    if IS_DOCKER:
+        result = _setup_docker_connection(args)
+        media_folder = _get_default_media_dir()
+    else:
+        result = _setup_non_docker_connection(args)
+        media_folder = args.folder
+
+    if result[0] is None:
+        return False
+
+    host, port, username, password, _, client = result
+    category = _get_category(args)
+    tags = _get_tags(args)
+    fetch_method = args.fetch_method
+
+    if not media_folder:
+        print("Error: media folder is required for --fetch. Use --folder or set ACEPACE_MEDIA_DIR_LOCAL.")
+        return False
+
+    try:
+        client_obj = get_client(client, host, port, username, password)
+    except ConnectionError as e:
+        print(f"Connection Error: {e}")
+        return False
+
+    completed = client_obj.get_completed_torrents(category=category, tags=tags)
+    if not completed:
+        print("No completed torrents found.")
+        return True
+
+    filter_desc = ""
+    if category:
+        filter_desc += f" in category '{category}'"
+    if tags:
+        filter_desc += f" with tag(s) {tags}"
+    print(f"Found {len(completed)} completed torrent(s){filter_desc}.")
+
+    fetched = skipped = errors = 0
+    for torrent in completed:
+        for file_path in torrent["files"]:
+            if os.path.splitext(file_path)[1].lower() not in VIDEO_EXTENSIONS:
+                continue
+            filename = os.path.basename(file_path)
+            dest = os.path.join(media_folder, filename)
+            if os.path.exists(dest):
+                skipped += 1
+                continue
+            if args.dry_run:
+                print(f"DRY RUN: Would {fetch_method} '{filename}' → '{media_folder}'")
+                fetched += 1
+                continue
+            try:
+                _fetch_file(file_path, dest, fetch_method)
+                print(f"Fetched ({fetch_method}): {filename}")
+                fetched += 1
+            except Exception as e:
+                print(f"Error fetching '{filename}': {e}")
+                errors += 1
+
+    suffix = " (dry run)" if args.dry_run else ""
+    print(f"Fetch complete{suffix}: {fetched} fetched, {skipped} already present, {errors} error(s).")
+    return errors == 0
 
 
 def _get_rename_prompt(last_ep_update):
@@ -2062,11 +2158,22 @@ Use --help for detailed command descriptions.
     parser.add_argument("--password", help="The BitTorrent client password.")
     parser.add_argument("--download-folder", help="The folder to download the torrents to.")
     parser.add_argument("--tag", action="append", help="Tag to add to the torrent in qBittorrent (can be used multiple times).")
-    parser.add_argument("--category", help="Category to add to the torrent in qBittorrent.")
+    parser.add_argument("--category", help="Category to assign to the torrent (qBittorrent only; also used to filter when fetching).")
+    parser.add_argument(
+        "--fetch",
+        action="store_true",
+        help="Fetch completed torrents from the client and copy/hardlink video files to the media folder.",
+    )
+    parser.add_argument(
+        "--fetch-method",
+        choices=["hardlink", "copy"],
+        default="hardlink",
+        help="Method to use when fetching files: 'hardlink' (default, same filesystem required) or 'copy'.",
+    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Download: test client without adding torrents. Rename: show rename plan without renaming.",
+        help="Download: test client without adding torrents. Rename/Fetch: show plan without making changes.",
     )
     return parser.parse_args()
 
@@ -2096,6 +2203,10 @@ def _handle_main_commands(args, conn, folder):
     """Handle main command execution."""
     if args.download:
         _handle_download_command(args)
+        return
+
+    if args.fetch:
+        _handle_fetch_command(args)
         return
 
     if args.rename:
